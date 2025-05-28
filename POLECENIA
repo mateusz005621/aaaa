@@ -1,0 +1,1795 @@
+-- Ultimate Resolver System for CS:GO
+-- Combines all modern resolver techniques with advanced prediction
+
+local resolver = {
+    -- UI References
+    refs = {
+        -- Main toggle
+        enabled = ui.new_checkbox("RAGE", "Other", "Enable Ultimate Resolver™"),
+        
+        -- Visualizations in a multiselect
+        visuals = ui.new_multiselect("RAGE", "Other", "Resolver visuals", {
+            "Show resolved angle",
+            "Show fake angle", 
+            "Show LBY timer",
+            "Show desync range",
+            "Show success rate",
+            "Show AA type",
+            "Show shot registry"
+        }),
+        
+        -- Debug mode separate
+        debug_mode = ui.new_checkbox("RAGE", "Other", "Debug mode"),
+        
+        -- Shot registry window
+        shot_log = ui.new_checkbox("RAGE", "Other", "Shot Registry™"),
+        shot_log_size = ui.new_slider("RAGE", "Other", "Registry size", 5, 50, 20),
+        
+        -- Anti-underdamage system
+        anti_underdmg = ui.new_checkbox("RAGE", "Other", "Anti-Underdamage™"),
+        min_damage_override = ui.new_slider("RAGE", "Other", "Minimum damage", 1, 126, 10),
+        lethal_damage = ui.new_checkbox("RAGE", "Other", "Prefer lethal damage"),
+        scale_damage = ui.new_checkbox("RAGE", "Other", "Scale damage by distance")
+    },
+    
+    -- Constants
+    MAX_DESYNC_DELTA = 58,
+    LBY_UPDATE_TIME = 1.1,
+    SEGMENTS = 3, -- Will be adaptive
+    
+    -- Player data storage
+    players = {},
+    
+    -- Global resolver state
+    global_state = {
+        current_method = "hybrid",
+        success_rate = {},
+        total_shots = 0,
+        resolved_shots = 0
+    },
+    
+    -- Shot registry
+    shot_registry = {},
+    
+    -- Startup animation
+    startup = {
+        active = true,
+        start_time = globals.realtime(),
+        duration = 3, -- Clean 3 second animation
+        phase = 0,
+        particles = {},
+        lightning_strikes = {},
+        dna_strands = {}
+    }
+}
+
+-- References to rage bot settings
+local rage_refs = {}
+
+-- Safely get references with pcall
+local function get_reference(tab, container, name)
+    local success, ref = pcall(ui.reference, tab, container, name)
+    if success then
+        return ref
+    else
+        return nil
+    end
+end
+
+-- Try to get rage bot references
+rage_refs.minimum_damage = get_reference("RAGE", "Aimbot", "Minimum damage")
+rage_refs.minimum_damage_override = get_reference("RAGE", "Aimbot", "Minimum damage override")
+rage_refs.target_selection = get_reference("RAGE", "Aimbot", "Target selection")
+rage_refs.target_hitbox = get_reference("RAGE", "Aimbot", "Target hitbox")
+rage_refs.multi_point = get_reference("RAGE", "Aimbot", "Multi-point")
+rage_refs.multi_point_scale = get_reference("RAGE", "Aimbot", "Multi-point scale")
+rage_refs.automatic_fire = get_reference("RAGE", "Aimbot", "Automatic fire")
+rage_refs.automatic_penetration = get_reference("RAGE", "Aimbot", "Automatic penetration")
+rage_refs.hit_chance = get_reference("RAGE", "Aimbot", "Minimum hit chance")
+rage_refs.avoid_unsafe_hitboxes = get_reference("RAGE", "Aimbot", "Avoid unsafe hitboxes")
+rage_refs.force_safe_point = get_reference("RAGE", "Other", "Force safe point")
+rage_refs.force_body_aim = get_reference("RAGE", "Other", "Force body aim")
+
+-- Store original damage values
+local original_damage = {}
+
+-- Shot tracking system
+local shot_data = {}
+
+-- Initialize player data
+local function init_player(idx)
+    return {
+        -- Angles
+        eye_angles = {pitch = 0, yaw = 0},
+        abs_angles = {pitch = 0, yaw = 0},
+        body_yaw = 0,
+        
+        -- Angle history
+        yaw_history = {},
+        pitch_history = {},
+        lby_history = {},
+        
+        -- Desync detection
+        is_desyncing = false,
+        desync_side = 0, -- -1 left, 0 unknown, 1 right
+        desync_amount = 0,
+        max_desync = 58,
+        
+        -- LBY tracking
+        lby_timer = 0,
+        last_lby_update = 0,
+        next_lby_update = 0,
+        lby_can_update = false,
+        
+        -- Movement
+        velocity = {x = 0, y = 0, z = 0},
+        speed = 0,
+        is_moving = false,
+        last_move_time = 0,
+        is_slow_walking = false,
+        last_velocity = 0,
+        
+        -- Animation layers
+        layers = {},
+        layer_sequence = {},
+        layer_weight = {},
+        layer_cycle = {},
+        
+        -- Resolver data
+        missed_shots = 0,
+        hit_shots = 0,
+        last_miss_reason = "",
+        resolver_mode = "none",
+        resolved_yaw = 0,
+        resolved_pitch = 0,
+        
+        -- Bruteforce data
+        bruteforce_phase = 0,
+        bruteforce_angles = {},
+        tested_angles = {},
+        current_bruteforce_angle = 0,
+        
+        -- Prediction data
+        predicted_yaw = 0,
+        prediction_confidence = 0,
+        
+        -- Pattern detection
+        patterns = {
+            jitter = false,
+            static = false,
+            switch = false,
+            random = false
+        },
+        
+        -- Anti-aim detection
+        aa_type = "unknown",
+        is_legit_aa = false,
+        is_rage_aa = false,
+        is_defensive = false,
+        defensive_ticks = 0,
+        defensive_type = nil,
+        last_sim_time = 0,
+        
+        -- Statistics
+        shots_fired_at = 0,
+        shots_hit = 0,
+        resolver_overrides = {},
+        
+        -- Machine learning features
+        ml_features = {},
+        ml_prediction = 0,
+        ml_confidence = 0,
+        
+        -- Additional data
+        real_yaw = 0,
+        fake_yaw = 0,
+        optimal_damage = 0
+    }
+end
+
+-- Get or create player data
+local function get_player(idx)
+    if not resolver.players[idx] then
+        resolver.players[idx] = init_player(idx)
+    end
+    return resolver.players[idx]
+end
+
+-- Normalize angle
+local function normalize_yaw(yaw)
+    while yaw > 180 do yaw = yaw - 360 end
+    while yaw < -180 do yaw = yaw + 360 end
+    return yaw
+end
+
+-- Calculate angle difference
+local function angle_diff(a1, a2)
+    local diff = normalize_yaw(a1 - a2)
+    return math.abs(diff)
+end
+
+-- Detect animation desync with improved methods
+local function detect_desync_from_animations(player, data)
+    -- Get animation state for better detection
+    local anim_state = entity.get_anim_state(player)
+    if not anim_state then
+        -- Fallback to basic detection
+        if data.speed < 0.1 then
+            local yaw_diff = angle_diff(data.eye_angles.yaw, data.body_yaw)
+            
+            if yaw_diff > 35 then
+                data.is_desyncing = true
+                local raw_diff = normalize_yaw(data.eye_angles.yaw - data.body_yaw)
+                data.desync_side = raw_diff > 0 and 1 or -1
+                data.desync_amount = math.min(yaw_diff, 58)
+            else
+                data.is_desyncing = false
+                data.desync_side = 0
+            end
+        else
+            data.is_desyncing = false
+            data.desync_side = 0
+            data.desync_amount = 0
+        end
+        return
+    end
+    
+    -- Advanced detection using anim state
+    local eye_yaw = anim_state.eye_yaw
+    local goal_feet_yaw = anim_state.goal_feet_yaw
+    
+    -- Calculate real desync
+    local desync_delta = normalize_yaw(eye_yaw - goal_feet_yaw)
+    
+    if math.abs(desync_delta) > 15 then
+        data.is_desyncing = true
+        data.desync_side = desync_delta > 0 and 1 or -1
+        data.desync_amount = math.min(math.abs(desync_delta), 58)
+        
+        -- Store for pattern analysis
+        data.real_yaw = goal_feet_yaw
+        data.fake_yaw = eye_yaw
+    else
+        data.is_desyncing = false
+        data.desync_side = 0
+        data.desync_amount = 0
+    end
+    
+    -- Check animation layers for additional info
+    local layers = entity.get_anim_overlay(player)
+    if layers then
+        -- Layer 3 = ADJUST (desync layer)
+        local adjust_layer = layers[3]
+        if adjust_layer and adjust_layer.weight > 0 then
+            -- Player is desyncing
+            data.is_desyncing = true
+            
+            -- Layer 6 = MOVEMENT
+            local move_layer = layers[6]
+            if move_layer and move_layer.weight < 0.9 then
+                -- Not fully moving, possibly slow walking
+                data.is_slow_walking = true
+            else
+                data.is_slow_walking = false
+            end
+        end
+        
+        -- Store layer data for analysis
+        data.layers = layers
+    end
+end
+
+-- Calculate LBY timer
+local function update_lby_timer(player, data)
+    local curtime = globals.curtime()
+    
+    -- Check if player is moving
+    if data.speed > 0.1 then
+        data.lby_timer = 0
+        data.last_lby_update = curtime
+        data.next_lby_update = 0
+        data.lby_can_update = false
+    else
+        -- Calculate time since last movement
+        local time_since_move = curtime - data.last_move_time
+        
+        if time_since_move >= resolver.LBY_UPDATE_TIME then
+            data.lby_can_update = true
+            data.next_lby_update = data.last_lby_update + resolver.LBY_UPDATE_TIME
+        else
+            data.lby_timer = time_since_move / resolver.LBY_UPDATE_TIME
+            data.lby_can_update = false
+        end
+    end
+end
+
+-- Detect defensive anti-aim and exploits
+local function detect_defensive(player, data)
+    local pitch = data.eye_angles.pitch
+    
+    -- Check simulation time for defensive detection
+    local sim_time = entity.get_prop(player, "m_flSimulationTime")
+    local old_sim_time = data.last_sim_time or sim_time
+    
+    -- Calculate tickbase manipulation
+    local sim_diff = sim_time - old_sim_time
+    local expected_diff = globals.tickinterval()
+    
+    -- Check for breaking lagcomp
+    if sim_diff <= 0 then
+        -- Simulation time not updating = defensive
+        data.is_defensive = true
+        data.defensive_ticks = (data.defensive_ticks or 0) + 1
+        data.defensive_type = "lagcomp"
+    elseif sim_diff > expected_diff * 1.5 then
+        -- Large simulation time jump = exploit
+        data.is_defensive = true
+        data.defensive_ticks = (data.defensive_ticks or 0) + 1
+        data.defensive_type = "exploit"
+    elseif math.abs(pitch) > 89 then
+        -- Impossible pitch = defensive
+        data.is_defensive = true
+        data.defensive_ticks = (data.defensive_ticks or 0) + 1
+        data.defensive_type = "pitch"
+    else
+        -- Check pitch variance for jitter defensive
+        if #data.pitch_history > 10 then
+            local variance = 0
+            for i = 2, 10 do
+                variance = variance + math.abs(data.pitch_history[i] - data.pitch_history[i-1])
+            end
+            
+            if variance > 300 then
+                data.is_defensive = true
+                data.defensive_ticks = (data.defensive_ticks or 0) + 1
+                data.defensive_type = "jitter"
+            else
+                -- Not defensive, decay ticks
+                if data.defensive_ticks and data.defensive_ticks > 0 then
+                    data.defensive_ticks = data.defensive_ticks - 1
+                    if data.defensive_ticks == 0 then
+                        data.is_defensive = false
+                        data.defensive_type = nil
+                    end
+                end
+            end
+        end
+    end
+    
+    -- Store sim time for next check
+    data.last_sim_time = sim_time
+    
+    -- If defensive, don't resolve
+    if data.is_defensive then
+        data.resolved_yaw = data.body_yaw
+        data.resolved_pitch = 0
+        data.resolver_mode = "defensive"
+        
+        -- Force safe point on defensive players
+        plist.set(player, "Force safe point", true)
+    else
+        plist.set(player, "Force safe point", false)
+    end
+    
+    return data.is_defensive
+end
+
+-- Detect anti-aim patterns
+local function detect_aa_pattern(player, data)
+    if #data.yaw_history < 32 then return end
+    
+    -- Reset patterns
+    data.patterns = {
+        jitter = false,
+        static = false,
+        switch = false,
+        random = false
+    }
+    
+    -- Analyze last 32 ticks
+    local changes = 0
+    local total_diff = 0
+    local last_yaw = data.yaw_history[1]
+    
+    for i = 2, 32 do
+        local yaw = data.yaw_history[i]
+        local diff = angle_diff(yaw, last_yaw)
+        
+        if diff > 10 then
+            changes = changes + 1
+        end
+        
+        total_diff = total_diff + diff
+        last_yaw = yaw
+    end
+    
+    local avg_diff = total_diff / 31
+    
+    -- Classify pattern
+    if changes > 20 then
+        data.patterns.jitter = true
+        data.aa_type = "jitter"
+    elseif changes < 3 then
+        data.patterns.static = true
+        data.aa_type = "static"
+    elseif changes >= 3 and changes <= 10 then
+        data.patterns.switch = true
+        data.aa_type = "switch"
+    else
+        data.patterns.random = true
+        data.aa_type = "random"
+    end
+end
+
+-- Bruteforce resolver with intelligent angle selection
+local function resolve_bruteforce(player, data)
+    -- Initialize bruteforce angles based on AA type
+    if #data.bruteforce_angles == 0 then
+        if data.aa_type == "static" then
+            -- For static AA, test common static angles
+            data.bruteforce_angles = {0, 58, -58, 60, -60}
+        elseif data.aa_type == "jitter" then
+            -- For jitter, test extremes first
+            data.bruteforce_angles = {58, -58, 0, 29, -29, 90, -90}
+        elseif data.patterns.switch then
+            -- For switch AA, test both sides
+            data.bruteforce_angles = {58, -58, 45, -45, 60, -60}
+        else
+            -- Default comprehensive test
+            data.bruteforce_angles = {
+                0,      -- Center
+                58, -58,    -- Max desync
+                60, -60,    -- Over max (some cheats)
+                29, -29,    -- Half desync
+                45, -45,    -- Common angle
+                90, -90,    -- Side
+                35, -35,    -- Legit AA angle
+                120, -120,  -- Wide
+                180         -- Backwards
+            }
+        end
+        
+        -- Prioritize based on hit history
+        table.sort(data.bruteforce_angles, function(a, b)
+            local hits_a = data.resolver_overrides[normalize_yaw(data.body_yaw + a)] or 0
+            local hits_b = data.resolver_overrides[normalize_yaw(data.body_yaw + b)] or 0
+            return hits_a > hits_b
+        end)
+    end
+    
+    -- Get current phase
+    local phase = (data.bruteforce_phase % #data.bruteforce_angles) + 1
+    local test_angle = data.bruteforce_angles[phase]
+    
+    -- Skip already tested angles that failed multiple times
+    if data.tested_angles[test_angle] and data.tested_angles[test_angle] > 2 then
+        data.bruteforce_phase = data.bruteforce_phase + 1
+        phase = (data.bruteforce_phase % #data.bruteforce_angles) + 1
+        test_angle = data.bruteforce_angles[phase]
+    end
+    
+    -- Apply bruteforce angle
+    data.resolved_yaw = normalize_yaw(data.body_yaw + test_angle)
+    data.resolver_mode = "bruteforce"
+    data.current_bruteforce_angle = test_angle
+    
+    return data.resolved_yaw
+end
+
+-- Prediction resolver
+local function resolve_prediction(player, data)
+    local resolved_yaw = data.body_yaw
+    
+    -- LBY-based prediction
+    if data.lby_can_update then
+        -- Player's LBY is about to update
+        resolved_yaw = data.body_yaw
+        data.prediction_confidence = 0.9
+    elseif data.is_moving then
+        -- Moving players can't desync much
+        resolved_yaw = data.body_yaw
+        data.prediction_confidence = 0.95
+    else
+        -- Standing player - use pattern detection
+        if data.patterns.static then
+            -- Static AA - use last known good angle
+            if data.desync_side ~= 0 then
+                resolved_yaw = data.body_yaw + (data.desync_side * data.max_desync)
+            end
+            data.prediction_confidence = 0.7
+        elseif data.patterns.jitter then
+            -- Jitter AA - predict based on timing
+            local tick = globals.tickcount()
+            if tick % 2 == 0 then
+                resolved_yaw = data.body_yaw + data.max_desync
+            else
+                resolved_yaw = data.body_yaw - data.max_desync
+            end
+            data.prediction_confidence = 0.6
+        elseif data.patterns.switch then
+            -- Switch AA - track switches
+            if data.missed_shots > 0 then
+                -- Switch side after miss
+                data.desync_side = -data.desync_side
+                resolved_yaw = data.body_yaw + (data.desync_side * data.max_desync)
+            end
+            data.prediction_confidence = 0.65
+        else
+            -- Random/unknown - use animation detection
+            if data.desync_side ~= 0 then
+                resolved_yaw = data.body_yaw + (data.desync_side * data.max_desync)
+                data.prediction_confidence = 0.5
+            end
+        end
+    end
+    
+    data.resolved_yaw = normalize_yaw(resolved_yaw)
+    data.resolver_mode = "prediction"
+    
+    return data.resolved_yaw
+end
+
+-- Machine learning resolver with advanced feature extraction
+local function resolve_ml(player, data)
+    -- Extended feature extraction
+    local features = {
+        -- Movement features
+        speed = data.speed / 250, -- Normalize to 0-1
+        is_moving = data.is_moving and 1 or 0,
+        is_slow_walking = data.is_slow_walking and 1 or 0,
+        acceleration = 0,
+        
+        -- Timing features
+        lby_timer = data.lby_timer,
+        lby_can_update = data.lby_can_update and 1 or 0,
+        time_since_move = math.min((globals.curtime() - data.last_move_time) / 5, 1),
+        
+        -- Angle features
+        pitch = (data.eye_angles.pitch + 90) / 180, -- Normalize to 0-1
+        yaw_variance = 0,
+        pitch_variance = 0,
+        
+        -- Pattern features
+        pattern_jitter = data.patterns.jitter and 1 or 0,
+        pattern_static = data.patterns.static and 1 or 0,
+        pattern_switch = data.patterns.switch and 1 or 0,
+        pattern_random = data.patterns.random and 1 or 0,
+        
+        -- State features
+        has_defensive = data.is_defensive and 1 or 0,
+        defensive_ticks = math.min(data.defensive_ticks / 10, 1),
+        desync_detected = data.is_desyncing and 1 or 0,
+        desync_side = (data.desync_side + 1) / 2, -- Convert -1,0,1 to 0,0.5,1
+        desync_amount = data.desync_amount / 58,
+        
+        -- Performance features
+        missed_shots = math.min(data.missed_shots / 5, 1),
+        hit_rate = data.shots_fired_at > 0 and (data.hit_shots / data.shots_fired_at) or 0.5,
+        last_miss_resolver = data.last_miss_reason == "resolver" and 1 or 0
+    }
+    
+    -- Calculate variance if enough history
+    if #data.yaw_history > 10 then
+        local yaw_sum = 0
+        local pitch_sum = 0
+        for i = 1, 10 do
+            yaw_sum = yaw_sum + math.abs(data.yaw_history[i] - data.yaw_history[i+1])
+            pitch_sum = pitch_sum + math.abs(data.pitch_history[i] - data.pitch_history[i+1])
+        end
+        features.yaw_variance = math.min(yaw_sum / 900, 1) -- Normalize
+        features.pitch_variance = math.min(pitch_sum / 900, 1)
+    end
+    
+    -- Calculate acceleration
+    if data.last_velocity then
+        local accel = math.abs(data.speed - data.last_velocity)
+        features.acceleration = math.min(accel / 100, 1)
+    end
+    data.last_velocity = data.speed
+    
+    -- Multi-layer neural network simulation
+    -- Layer 1 weights (feature extraction)
+    local layer1_weights = {
+        -- Movement cluster
+        {speed = 0.8, acceleration = 0.6, is_moving = 0.9, is_slow_walking = 0.4},
+        -- Timing cluster
+        {lby_timer = 0.9, lby_can_update = 0.8, time_since_move = 0.7},
+        -- Pattern cluster
+        {pattern_jitter = 0.8, pattern_static = -0.8, yaw_variance = 0.7, pitch_variance = 0.5},
+        -- State cluster
+        {has_defensive = 0.9, defensive_ticks = 0.8, desync_detected = 0.7, desync_side = 0.6}
+    }
+    
+    -- Calculate layer 1 outputs
+    local layer1_outputs = {}
+    for i, weights in ipairs(layer1_weights) do
+        local output = 0
+        for feature, weight in pairs(weights) do
+            output = output + (features[feature] or 0) * weight
+        end
+        -- ReLU activation
+        layer1_outputs[i] = math.max(0, output)
+    end
+    
+    -- Layer 2 weights (decision making)
+    local layer2_weights = {
+        movement_factor = {0.3, -0.8, 0.2, 0.1},
+        pattern_factor = {-0.2, 0.4, 0.9, 0.3},
+        defensive_factor = {0.1, 0.2, -0.3, 0.9}
+    }
+    
+    -- Calculate final outputs
+    local final_outputs = {}
+    for name, weights in pairs(layer2_weights) do
+        local output = 0
+        for i, weight in ipairs(weights) do
+            output = output + layer1_outputs[i] * weight
+        end
+        -- Sigmoid activation
+        final_outputs[name] = 1 / (1 + math.exp(-output))
+    end
+    
+    -- Combine factors based on confidence
+    local movement_weight = final_outputs.movement_factor * (1 - features.is_moving)
+    local pattern_weight = final_outputs.pattern_factor * features.yaw_variance
+    local defensive_weight = final_outputs.defensive_factor * features.has_defensive
+    
+    local total_weight = movement_weight + pattern_weight + defensive_weight
+    if total_weight == 0 then total_weight = 1 end
+    
+    -- Calculate final angle prediction
+    local angle_prediction = 0
+    
+    -- Movement-based prediction
+    if movement_weight > 0 then
+        if features.lby_can_update > 0 then
+            angle_prediction = angle_prediction + (0 * movement_weight) -- LBY = real
+        else
+            angle_prediction = angle_prediction + (data.desync_side * movement_weight)
+        end
+    end
+    
+    -- Pattern-based prediction
+    if pattern_weight > 0 then
+        if features.pattern_static > 0 then
+            angle_prediction = angle_prediction + (data.desync_side * pattern_weight)
+        elseif features.pattern_jitter > 0 then
+            -- Jitter prediction based on tick
+            local tick_based = (globals.tickcount() % 3 - 1) -- -1, 0, 1
+            angle_prediction = angle_prediction + (tick_based * pattern_weight)
+        end
+    end
+    
+    -- Normalize prediction
+    angle_prediction = angle_prediction / total_weight
+    
+    -- Convert to actual angle
+    local resolved_angle = angle_prediction * data.max_desync
+    data.resolved_yaw = normalize_yaw(data.body_yaw + resolved_angle)
+    data.resolver_mode = "ml"
+    data.ml_prediction = angle_prediction
+    data.ml_confidence = math.max(movement_weight, pattern_weight, defensive_weight) / total_weight
+    
+    return data.resolved_yaw
+end
+
+-- Helper function to check if visual is enabled
+local function has_visual(name)
+    local visuals = ui.get(resolver.refs.visuals)
+    for i = 1, #visuals do
+        if visuals[i] == name then
+            return true
+        end
+    end
+    return false
+end
+
+-- Hybrid resolver - combines all methods
+local function resolve_hybrid(player, data)
+    local methods = {}
+    local weights = {}
+    
+    -- Always use all methods automatically
+    methods.bruteforce = resolve_bruteforce(player, data)
+    weights.bruteforce = 0.3
+    
+    methods.prediction = resolve_prediction(player, data)
+    weights.prediction = data.prediction_confidence or 0.5
+    
+    methods.ml = resolve_ml(player, data)
+    weights.ml = 0.4
+    
+    -- Weight based on success rate
+    local total_weight = 0
+    local weighted_yaw = 0
+    
+    for method, yaw in pairs(methods) do
+        local weight = weights[method] or 0.33
+        
+        -- Adjust weight based on hit rate
+        local success_rate = resolver.global_state.success_rate[method] or 0.5
+        weight = weight * success_rate
+        
+        weighted_yaw = weighted_yaw + (yaw * weight)
+        total_weight = total_weight + weight
+    end
+    
+    -- Calculate final resolved angle
+    if total_weight > 0 then
+        data.resolved_yaw = normalize_yaw(weighted_yaw / total_weight)
+    else
+        -- Fallback to body yaw
+        data.resolved_yaw = data.body_yaw
+    end
+    
+    data.resolver_mode = "hybrid"
+    return data.resolved_yaw
+end
+
+-- Main resolver update
+local function update_resolver(player)
+    local data = get_player(player)
+    
+    -- Update basic data
+    local pitch, yaw = entity.get_prop(player, "m_angEyeAngles")
+    if not pitch or not yaw then return end
+    
+    data.eye_angles = {pitch = pitch, yaw = yaw}
+    data.body_yaw = entity.get_prop(player, "m_flLowerBodyYawTarget") or yaw
+    
+    -- Update velocity
+    local vx, vy, vz = entity.get_prop(player, "m_vecVelocity")
+    if vx then
+        data.velocity = {x = vx, y = vy, z = vz}
+        data.speed = math.sqrt(vx^2 + vy^2)
+        data.is_moving = data.speed > 0.1
+        
+        if data.is_moving then
+            data.last_move_time = globals.curtime()
+        end
+    end
+    
+    -- Update histories
+    table.insert(data.yaw_history, 1, yaw)
+    table.insert(data.pitch_history, 1, pitch)
+    table.insert(data.lby_history, 1, data.body_yaw)
+    
+    -- Limit history size
+    while #data.yaw_history > 64 do table.remove(data.yaw_history) end
+    while #data.pitch_history > 64 do table.remove(data.pitch_history) end
+    while #data.lby_history > 64 do table.remove(data.lby_history) end
+    
+    -- Detect defensive
+    detect_defensive(player, data)
+    
+    -- Update animations
+    detect_desync_from_animations(player, data)
+    
+    -- Update LBY timer
+    update_lby_timer(player, data)
+    
+    -- Detect AA pattern
+    detect_aa_pattern(player, data)
+    
+    -- Resolve angle
+    if data.is_defensive then
+        -- Don't resolve defensive players
+        data.resolved_yaw = data.body_yaw
+        data.resolved_pitch = 0
+        data.resolver_mode = "defensive"
+    else
+        -- Use hybrid resolver
+        resolve_hybrid(player, data)
+        data.resolved_pitch = 0 -- Pitch is usually 0 for non-defensive
+    end
+end
+
+-- Calculate optimal damage for target
+local function calculate_optimal_damage(target)
+    if not ui.get(resolver.refs.anti_underdmg) then
+        return nil
+    end
+    
+    local local_player = entity.get_local_player()
+    if not local_player then return nil end
+    
+    -- Get target health
+    local health = entity.get_prop(target, "m_iHealth")
+    if not health then return nil end
+    
+    -- Get weapon
+    local weapon = entity.get_player_weapon(local_player)
+    if not weapon then return nil end
+    
+    -- Get weapon info
+    local weapon_name = entity.get_classname(weapon)
+    local is_awp = weapon_name:find("awp")
+    local is_scout = weapon_name:find("ssg08")
+    local is_auto = weapon_name:find("scar") or weapon_name:find("g3sg1")
+    local is_deagle = weapon_name:find("deagle")
+    local is_revolver = weapon_name:find("revolver")
+    
+    -- Get distance to target
+    local lx, ly, lz = entity.get_prop(local_player, "m_vecOrigin")
+    local tx, ty, tz = entity.get_prop(target, "m_vecOrigin")
+    local distance = 0
+    if lx and tx then
+        distance = math.sqrt((lx - tx)^2 + (ly - ty)^2 + (lz - tz)^2)
+    end
+    
+    -- Base damage calculation
+    local min_damage = ui.get(resolver.refs.min_damage_override)
+    local optimal_damage = min_damage
+    
+    -- Lethal damage preference
+    if ui.get(resolver.refs.lethal_damage) then
+        -- For snipers, always go for kill
+        if is_awp or is_scout or is_auto then
+            optimal_damage = health + 10 -- Overkill to ensure death
+        elseif health <= 30 then
+            -- Low HP target, ensure kill
+            optimal_damage = health + 5
+        elseif health <= 50 and (is_deagle or is_revolver) then
+            -- Deagle/R8 can one-shot low HP
+            optimal_damage = health + 5
+        else
+            -- Regular weapons, try to do significant damage
+            optimal_damage = math.max(min_damage, math.floor(health * 0.6))
+        end
+    end
+    
+    -- Scale by distance if enabled
+    if ui.get(resolver.refs.scale_damage) then
+        -- Close range = more damage, long range = less damage
+        local distance_factor = 1
+        if distance < 500 then
+            distance_factor = 1.2 -- Close range bonus
+        elseif distance > 2000 then
+            distance_factor = 0.8 -- Long range penalty
+        end
+        
+        optimal_damage = math.floor(optimal_damage * distance_factor)
+    end
+    
+    -- Ensure we don't go below minimum
+    optimal_damage = math.max(optimal_damage, min_damage)
+    
+    -- Cap at 126 (CS:GO damage limit)
+    optimal_damage = math.min(optimal_damage, 126)
+    
+    return optimal_damage
+end
+
+-- Apply optimal damage per target
+local function apply_damage_overrides()
+    if not ui.get(resolver.refs.enabled) or not ui.get(resolver.refs.anti_underdmg) then 
+        -- Restore original values
+        for enemy, dmg in pairs(original_damage) do
+            plist.set(enemy, "Override minimum damage", false)
+        end
+        original_damage = {}
+        return 
+    end
+    
+    local enemies = entity.get_players(true)
+    for i = 1, #enemies do
+        local enemy = enemies[i]
+        if entity.is_alive(enemy) then
+            local optimal_dmg = calculate_optimal_damage(enemy)
+            if optimal_dmg then
+                -- Store original if not stored
+                if not original_damage[enemy] then
+                    original_damage[enemy] = plist.get(enemy, "Override minimum damage")
+                end
+                
+                -- Apply override
+                plist.set(enemy, "Override minimum damage", true)
+                plist.set(enemy, "Minimum damage", optimal_dmg)
+                
+                -- Force body aim on low HP targets if lethal damage is enabled
+                if ui.get(resolver.refs.lethal_damage) then
+                    local health = entity.get_prop(enemy, "m_iHealth")
+                    if health and health <= optimal_dmg then
+                        plist.set(enemy, "Force body aim", true)
+                    else
+                        plist.set(enemy, "Force body aim", false)
+                    end
+                end
+            end
+        else
+            -- Clean up dead players
+            if original_damage[enemy] then
+                original_damage[enemy] = nil
+            end
+        end
+    end
+end
+
+-- Main setup command with all integrations
+local function on_setup_command(cmd)
+    if not ui.get(resolver.refs.enabled) then return end
+    
+    local local_player = entity.get_local_player()
+    if not local_player or not entity.is_alive(local_player) then return end
+    
+    -- Update all enemies
+    local enemies = entity.get_players(true)
+    for i = 1, #enemies do
+        if entity.is_alive(enemies[i]) then
+            update_resolver(enemies[i])
+        end
+    end
+    
+    -- Apply damage overrides
+    apply_damage_overrides()
+end
+
+-- Add shot to registry
+local function add_shot_to_registry(shot_data)
+    table.insert(resolver.shot_registry, 1, shot_data)
+    
+    -- Limit size
+    local max_size = ui.get(resolver.refs.shot_log_size)
+    while #resolver.shot_registry > max_size do
+        table.remove(resolver.shot_registry)
+    end
+end
+
+-- Track when we shoot
+client.set_event_callback("weapon_fire", function(e)
+    if not ui.get(resolver.refs.enabled) then return end
+    
+    local shooter = client.userid_to_entindex(e.userid)
+    if shooter ~= entity.get_local_player() then return end
+    
+    -- Get current target from aimbot
+    local enemies = entity.get_players(true)
+    local best_fov = 180
+    local target = nil
+    
+    local pitch, yaw = client.camera_angles()
+    
+    for i = 1, #enemies do
+        local enemy = enemies[i]
+        if entity.is_alive(enemy) then
+            local hx, hy, hz = entity.hitbox_position(enemy, 0)
+            if hx then
+                local fov = math.abs(normalize_yaw(yaw - select(2, entity.get_prop(enemy, "m_angEyeAngles"))))
+                if fov < best_fov then
+                    best_fov = fov
+                    target = enemy
+                end
+            end
+        end
+    end
+    
+    if target then
+        local data = get_player(target)
+        
+        -- Create shot record
+        local shot = {
+            time = globals.realtime(),
+            tick = globals.tickcount(),
+            player_name = entity.get_player_name(target) or "Unknown",
+            player_idx = target,
+            
+            -- Resolver data at time of shot
+            resolver_mode = data.resolver_mode,
+            resolved_yaw = data.resolved_yaw,
+            fake_yaw = data.eye_angles.yaw,
+            body_yaw = data.body_yaw,
+            pitch = data.eye_angles.pitch,
+            
+            -- Target state
+            velocity = data.speed,
+            is_moving = data.is_moving,
+            is_defensive = data.is_defensive,
+            aa_type = data.aa_type,
+            desync_side = data.desync_side,
+            lby_timer = data.lby_timer,
+            
+            -- Shot info
+            hit_chance = 0,
+            damage = 0,
+            hitgroup = 0,
+            backtrack = 0,
+            
+            -- Results (filled later)
+            result = "pending",
+            actual_damage = 0,
+            hit_hitgroup = 0,
+            miss_reason = ""
+        }
+        
+        -- Store shot for tracking
+        shot_data[globals.tickcount()] = shot
+        add_shot_to_registry(shot)
+        
+        -- Track shot count
+        data.shots_fired_at = data.shots_fired_at + 1
+        
+        -- Mark tested angle for bruteforce
+        if data.resolver_mode == "bruteforce" and data.current_bruteforce_angle then
+            data.tested_angles[data.current_bruteforce_angle] = (data.tested_angles[data.current_bruteforce_angle] or 0) + 1
+        end
+    end
+end)
+
+-- Handle bullet impacts to detect misses
+client.set_event_callback("bullet_impact", function(e)
+    if not ui.get(resolver.refs.enabled) then return end
+    
+    local shooter = client.userid_to_entindex(e.userid)
+    if shooter ~= entity.get_local_player() then return end
+    
+    -- Check if we have a pending shot
+    local tick = globals.tickcount()
+    for shot_tick, shot in pairs(shot_data) do
+        if tick - shot_tick < 2 and shot.result == "pending" then
+            -- This shot hasn't hit yet, might be a miss
+            shot.potential_miss = true
+        end
+    end
+end)
+
+-- Handle hits
+client.set_event_callback("player_hurt", function(e)
+    if not ui.get(resolver.refs.enabled) then return end
+    
+    local attacker = client.userid_to_entindex(e.attacker)
+    if attacker ~= entity.get_local_player() then return end
+    
+    local victim = client.userid_to_entindex(e.userid)
+    local damage = e.dmg_health
+    local hitgroup = e.hitgroup
+    
+    -- Find the shot
+    local tick = globals.tickcount()
+    for shot_tick, shot in pairs(shot_data) do
+        if shot.player_idx == victim and shot.result == "pending" and tick - shot_tick < 5 then
+            -- This is our shot
+            shot.result = "hit"
+            shot.actual_damage = damage
+            shot.hit_hitgroup = hitgroup
+            
+            -- Update player data
+            local data = get_player(victim)
+            data.hit_shots = data.hit_shots + 1
+            
+            -- Store successful angle
+            data.resolver_overrides[data.resolved_yaw] = (data.resolver_overrides[data.resolved_yaw] or 0) + 1
+            
+            -- Update global statistics
+            local method = data.resolver_mode
+            if method then
+                resolver.global_state.success_rate[method] = resolver.global_state.success_rate[method] or 0.5
+                resolver.global_state.success_rate[method] = math.min(1, resolver.global_state.success_rate[method] * 1.1)
+            end
+            
+            -- Update registry
+            for i, reg_shot in ipairs(resolver.shot_registry) do
+                if reg_shot.result == "pending" and reg_shot.player_idx == victim then
+                    reg_shot.result = "hit"
+                    reg_shot.actual_damage = damage
+                    reg_shot.hit_hitgroup = hitgroup
+                    break
+                end
+            end
+            
+            break
+        end
+    end
+    
+    -- Clean old shot data
+    for shot_tick, shot in pairs(shot_data) do
+        if tick - shot_tick > 64 then
+            shot_data[shot_tick] = nil
+        end
+    end
+end)
+
+-- Draw shot registry window
+local function draw_shot_registry()
+    if not ui.get(resolver.refs.shot_log) then return end
+    
+    local screen_x, screen_y = client.screen_size()
+    local x, y = screen_x - 420, 100
+    local w, h = 400, 300
+    
+    -- Window background
+    renderer.rectangle(x, y, w, h, 10, 10, 10, 200)
+    
+    -- Header gradient
+    renderer.gradient(x, y, w, 25, 100, 100, 255, 255, 50, 50, 150, 255, true)
+    renderer.text(x + w/2, y + 12, 255, 255, 255, 255, "cb", 0, "SHOT REGISTRY™")
+    
+    -- Column headers
+    local col_y = y + 30
+    renderer.text(x + 10, col_y, 200, 200, 200, 255, "-", 0, "TIME")
+    renderer.text(x + 60, col_y, 200, 200, 200, 255, "-", 0, "TARGET")
+    renderer.text(x + 150, col_y, 200, 200, 200, 255, "-", 0, "RESULT")
+    renderer.text(x + 220, col_y, 200, 200, 200, 255, "-", 0, "REASON")
+    renderer.text(x + 320, col_y, 200, 200, 200, 255, "-", 0, "RESOLVER")
+    
+    -- Draw shots
+    local shot_y = col_y + 15
+    for i, shot in ipairs(resolver.shot_registry) do
+        if shot_y > y + h - 10 then break end
+        
+        -- Time
+        local time_ago = globals.realtime() - shot.time
+        local time_str = string.format("%.1fs", time_ago)
+        renderer.text(x + 10, shot_y, 150, 150, 150, 255, "-", 0, time_str)
+        
+        -- Target name
+        renderer.text(x + 60, shot_y, 255, 255, 255, 255, "-", 0, shot.player_name:sub(1, 12))
+        
+        -- Result
+        local result_color = {150, 150, 150}
+        if shot.result == "hit" then
+            result_color = {100, 255, 100}
+            renderer.text(x + 150, shot_y, result_color[1], result_color[2], result_color[3], 255, "-", 0, "HIT")
+            renderer.text(x + 220, shot_y, 200, 200, 200, 255, "-", 0, shot.actual_damage .. " dmg")
+        elseif shot.result == "miss" then
+            result_color = {255, 100, 100}
+            renderer.text(x + 150, shot_y, result_color[1], result_color[2], result_color[3], 255, "-", 0, "MISS")
+            
+            -- Color code miss reasons
+            local reason_color = {255, 150, 150}
+            if shot.miss_reason == "resolver" then
+                reason_color = {255, 100, 255}
+            elseif shot.miss_reason == "spread" then
+                reason_color = {255, 255, 100}
+            end
+            
+            renderer.text(x + 220, shot_y, reason_color[1], reason_color[2], reason_color[3], 255, "-", 0, shot.miss_reason)
+        else
+            renderer.text(x + 150, shot_y, result_color[1], result_color[2], result_color[3], 255, "-", 0, "...")
+        end
+        
+        -- Resolver mode
+        renderer.text(x + 320, shot_y, 150, 200, 255, 255, "-", 0, shot.resolver_mode)
+        
+        -- Extra info on hover
+        local mouse_x, mouse_y = ui.mouse_position()
+        if mouse_x >= x and mouse_x <= x + w and mouse_y >= shot_y and mouse_y <= shot_y + 12 then
+            -- Draw tooltip
+            local tip_x = x - 200
+            local tip_y = shot_y
+            
+            renderer.rectangle(tip_x, tip_y, 190, 80, 20, 20, 20, 240)
+            renderer.rectangle(tip_x, tip_y, 190, 1, 100, 100, 255, 255)
+            
+            renderer.text(tip_x + 5, tip_y + 5, 255, 255, 255, 255, "-", 0, "Shot Details:")
+            renderer.text(tip_x + 5, tip_y + 20, 200, 200, 200, 255, "-", 0, string.format("Resolved: %.0f°", shot.resolved_yaw))
+            renderer.text(tip_x + 5, tip_y + 32, 200, 200, 200, 255, "-", 0, string.format("Fake: %.0f°", shot.fake_yaw))
+            renderer.text(tip_x + 5, tip_y + 44, 200, 200, 200, 255, "-", 0, string.format("AA Type: %s", shot.aa_type))
+            renderer.text(tip_x + 5, tip_y + 56, 200, 200, 200, 255, "-", 0, string.format("Defensive: %s", shot.is_defensive and "Yes" or "No"))
+            renderer.text(tip_x + 5, tip_y + 68, 200, 200, 200, 255, "-", 0, string.format("HC: %d%% | BT: %d", shot.hit_chance, shot.backtrack))
+        end
+        
+        shot_y = shot_y + 14
+    end
+    
+    -- Statistics at bottom
+    local stats_y = y + h - 20
+    local total_shots = #resolver.shot_registry
+    local hits = 0
+    local misses = 0
+    local resolver_misses = 0
+    
+    for _, shot in ipairs(resolver.shot_registry) do
+        if shot.result == "hit" then
+            hits = hits + 1
+        elseif shot.result == "miss" then
+            misses = misses + 1
+            if shot.miss_reason == "resolver" then
+                resolver_misses = resolver_misses + 1
+            end
+        end
+    end
+    
+    local hit_rate = total_shots > 0 and (hits / total_shots * 100) or 0
+    renderer.text(x + 10, stats_y, 255, 255, 255, 255, "-", 0, string.format("Total: %d | Hits: %d | Misses: %d | Rate: %.0f%% | Resolver fails: %d", 
+        total_shots, hits, misses, hit_rate, resolver_misses))
+end
+
+-- Draw startup animation (clean but impressive)
+local function draw_startup_animation()
+    local data = resolver.startup
+    if not data.active then return end
+    
+    local current_time = globals.realtime()
+    local elapsed = current_time - data.start_time
+    
+    if elapsed > data.duration then
+        data.active = false
+        return
+    end
+    
+    local screen_x, screen_y = client.screen_size()
+    local center_x, center_y = screen_x / 2, screen_y / 2
+    
+    -- Calculate progress
+    local progress = elapsed / data.duration
+    
+    -- Smooth fade in/out
+    local alpha = 255
+    if progress < 0.1 then
+        alpha = (progress / 0.1) * 255
+    elseif progress > 0.9 then
+        alpha = ((1 - progress) / 0.1) * 255
+    end
+    
+    -- Dark background with gradient
+    renderer.gradient(0, 0, screen_x, screen_y/2, 
+        5, 5, 15, alpha * 0.95,
+        10, 10, 25, alpha * 0.95, false)
+    renderer.gradient(0, screen_y/2, screen_x, screen_y/2,
+        10, 10, 25, alpha * 0.95,
+        5, 5, 15, alpha * 0.95, false)
+    
+    -- Animated hex grid (subtle)
+    local hex_size = 40
+    for x = -hex_size, screen_x + hex_size, hex_size * 3 do
+        for y = -hex_size, screen_y + hex_size, hex_size * 2 do
+            local offset = (y / (hex_size * 2)) % 2 == 0 and 0 or hex_size * 1.5
+            local distance = math.sqrt((x - center_x)^2 + (y - center_y)^2)
+            local wave = math.sin(distance * 0.005 - current_time * 2) * 30 + 30
+            local hex_alpha = wave * alpha / 255 * 0.3
+            
+            for i = 0, 5 do
+                local angle1 = (i / 6) * math.pi * 2
+                local angle2 = ((i + 1) / 6) * math.pi * 2
+                
+                local x1 = x + offset + math.cos(angle1) * hex_size
+                local y1 = y + math.sin(angle1) * hex_size
+                local x2 = x + offset + math.cos(angle2) * hex_size
+                local y2 = y + math.sin(angle2) * hex_size
+                
+                renderer.line(x1, y1, x2, y2, 100, 150, 255, hex_alpha)
+            end
+        end
+    end
+    
+    -- Central rotating element
+    local rotation = current_time * 1.5
+    for i = 1, 3 do
+        local radius = 100 + i * 30
+        local segments = 3 + i
+        
+        for j = 0, segments - 1 do
+            local angle1 = (j / segments) * math.pi * 2 + rotation / i
+            local angle2 = ((j + 1) / segments) * math.pi * 2 + rotation / i
+            
+            local x1 = center_x + math.cos(angle1) * radius
+            local y1 = center_y + math.sin(angle1) * radius * 0.3
+            local x2 = center_x + math.cos(angle2) * radius
+            local y2 = center_y + math.sin(angle2) * radius * 0.3
+            
+            local element_alpha = alpha * (0.6 - i * 0.15)
+            renderer.line(x1, y1, x2, y2, 100, 150, 255, element_alpha)
+        end
+    end
+    
+    -- Logo animation
+    if progress > 0.2 then
+        local logo_progress = (progress - 0.2) / 0.3
+        local logo_alpha = logo_progress * alpha
+        
+        -- Glowing lines effect
+        for i = 1, 3 do
+            local line_width = logo_progress * 250 / i
+            local line_alpha = logo_alpha / i
+            renderer.gradient(center_x - line_width/2, center_y - 80, line_width, 2,
+                0, 100, 255, 0,
+                100, 150, 255, line_alpha,
+                true)
+        end
+        
+        -- Main text with glow
+        for glow = 5, 1, -1 do
+            local glow_alpha = logo_alpha / (glow * 2)
+            renderer.text(center_x, center_y - 60, 100, 150, 255, glow_alpha, "cb+", 0, "ULTIMATE")
+        end
+        renderer.text(center_x, center_y - 60, 255, 255, 255, logo_alpha, "cb", 0, "ULTIMATE")
+        
+        -- Subtitle
+        renderer.text(center_x, center_y - 30, 150, 150, 200, logo_alpha * 0.8, "c", 0, "RESOLVER")
+        
+        -- Version badge
+        local badge_y = center_y - 10
+        renderer.rectangle(center_x - 20, badge_y - 8, 40, 16, 100, 150, 255, logo_alpha * 0.2)
+        renderer.text(center_x, badge_y, 100, 150, 255, logo_alpha * 0.8, "c-", 0, "v2.0")
+    end
+    
+    -- Feature cards animation
+    if progress > 0.4 and progress < 0.8 then
+        local feat_progress = (progress - 0.4) / 0.4
+        
+        local features = {
+            {icon = "⚡", text = "Hybrid AI System", desc = "3 methods combined"},
+            {icon = "📊", text = "Shot Registry™", desc = "Track every shot"},
+            {icon = "🛡️", text = "Defensive Detect", desc = "Anti-aim counter"},
+            {icon = "🧠", text = "Machine Learning", desc = "Self-improving"}
+        }
+        
+        for i, feature in ipairs(features) do
+            local card_progress = math.min(1, feat_progress * 2 - (i - 1) * 0.25)
+            if card_progress > 0 then
+                local card_y = center_y + 20 + (i - 1) * 30
+                local card_x = center_x - 150 + (1 - card_progress) * 50
+                local card_alpha = card_progress * alpha
+                
+                -- Card background
+                renderer.rectangle(card_x - 5, card_y - 10, 300, 25, 20, 20, 30, card_alpha * 0.3)
+                
+                -- Icon background circle
+                renderer.circle(card_x + 10, card_y, 100, 150, 255, card_alpha * 0.2, 12, 0, 1)
+                
+                -- Icon
+                renderer.text(card_x + 10, card_y, 255, 255, 255, card_alpha, "c", 0, feature.icon)
+                
+                -- Text
+                renderer.text(card_x + 30, card_y, 255, 255, 255, card_alpha * 0.9, "-", 0, feature.text)
+                
+                -- Description
+                renderer.text(card_x + 130, card_y, 150, 150, 150, card_alpha * 0.7, "-", 0, feature.desc)
+            end
+        end
+    end
+    
+    -- Loading sequence
+    if progress > 0.7 then
+        local load_progress = (progress - 0.7) / 0.3
+        
+        -- Loading circle
+        local radius = 40
+        local segments = 32
+        for i = 1, segments do
+            if i / segments <= load_progress then
+                local angle1 = ((i - 1) / segments) * math.pi * 2 - math.pi / 2
+                local angle2 = (i / segments) * math.pi * 2 - math.pi / 2
+                
+                local x1 = center_x + math.cos(angle1) * radius
+                local y1 = center_y + 120 + math.sin(angle1) * radius
+                local x2 = center_x + math.cos(angle2) * radius
+                local y2 = center_y + 120 + math.sin(angle2) * radius
+                
+                local segment_progress = (i / segments) / load_progress
+                renderer.line(x1, y1, x2, y2, 
+                    100 + 155 * segment_progress,
+                    150,
+                    255,
+                    alpha * 0.8)
+            end
+        end
+        
+        -- Percentage
+        local percentage = math.floor(load_progress * 100)
+        renderer.text(center_x, center_y + 120, 200, 200, 200, alpha * 0.8, "c", 0, percentage .. "%")
+        
+        -- Status text  
+        local status = "INITIALIZING"
+        if load_progress > 0.8 then
+            status = "READY"
+        elseif load_progress > 0.5 then
+            status = "LOADING"
+        end
+        renderer.text(center_x, center_y + 140, 150, 150, 150, alpha * 0.6, "c-", 0, status)
+    end
+    
+    -- Particle effects
+    for i = 1, 50 do
+        local particle_offset = (i * 0.618 + current_time * 0.1) % 1
+        local y = screen_y - particle_offset * screen_y
+        local x = center_x + math.sin(i * 1.5 + current_time) * 200
+        local size = 1 + math.sin(i + current_time * 2) * 0.5
+        local p_alpha = (1 - particle_offset) * alpha * 0.5
+        
+        renderer.circle(x, y, 100, 150, 255, p_alpha, size, 0, 1)
+    end
+    
+    -- Energy waves
+    for wave = 1, 2 do
+        local wave_time = (current_time * 0.5 + wave * 0.5) % 2
+        if wave_time < 1 then
+            local wave_radius = wave_time * 300
+            local wave_alpha = (1 - wave_time) * alpha * 0.3
+            
+            renderer.circle_outline(center_x, center_y, 100, 150, 255, wave_alpha, wave_radius, 0, 1, 2)
+        end
+    end
+    
+    -- Skip instruction
+    if progress < 0.85 then
+        renderer.text(screen_x - 100, screen_y - 30, 150, 150, 150, alpha * 0.5, "c-", 0, "TAB to skip")
+    end
+    
+    -- Final fade
+    if progress > 0.9 then
+        local fade_progress = (progress - 0.9) * 10
+        renderer.rectangle(0, 0, screen_x, screen_y, 0, 0, 0, fade_progress * 255)
+    end
+end
+
+-- Optimized visualization
+local function on_paint()
+    -- Draw startup animation first
+    if resolver.startup.active then
+        draw_startup_animation()
+        
+        -- Skip on TAB press
+        local key_state = {client.key_state(0x09)} -- TAB key
+        if key_state[1] then
+            resolver.startup.active = false
+        end
+        return
+    end
+    
+    if not ui.get(resolver.refs.enabled) then return end
+    
+    -- Draw shot registry
+    draw_shot_registry()
+    
+    local local_player = entity.get_local_player()
+    if not local_player or not entity.is_alive(local_player) then return end
+    
+    local enemies = entity.get_players(true)
+    
+    for i = 1, #enemies do
+        local enemy = enemies[i]
+        if entity.is_alive(enemy) and entity.is_dormant(enemy) == false then
+            local data = get_player(enemy)
+            
+            -- Get head position for drawing
+            local hx, hy, hz = entity.hitbox_position(enemy, 0)
+            if not hx then goto continue end
+            
+            local sx, sy = renderer.world_to_screen(hx, hy, hz)
+            if not sx then goto continue end
+            
+            -- Calculate distance for scaling
+            local lx, ly, lz = entity.get_prop(local_player, "m_vecOrigin")
+            local distance = 0
+            if lx and hx then
+                distance = math.sqrt((lx - hx)^2 + (ly - hy)^2 + (lz - hz)^2)
+            end
+            
+            -- Skip if too far
+            if distance > 3000 then goto continue end
+            
+            -- Scale based on distance
+            local scale = math.max(0.5, math.min(1, 1000 / distance))
+            
+            -- Minimal info display
+            if has_visual("Show AA type") or has_visual("Show resolved angle") then
+                -- AA type indicator
+                if has_visual("Show AA type") and data.aa_type then
+                    local aa_text = data.aa_type:upper():sub(1, 3)
+                    local aa_color = {200, 200, 200}
+                    
+                    if data.is_defensive then
+                        aa_text = "DEF"
+                        aa_color = {255, 0, 255}
+                    elseif data.aa_type == "jitter" then
+                        aa_color = {255, 180, 50}
+                    elseif data.aa_type == "static" then
+                        aa_color = {50, 255, 150}
+                    end
+                    
+                    -- Background for visibility
+                    renderer.rectangle(sx - 15, sy - 90, 30, 12, 10, 10, 10, 150)
+                    renderer.text(sx, sy - 85, aa_color[1], aa_color[2], aa_color[3], 255, "c-", 0, aa_text)
+                end
+                
+                -- Resolver confidence bar
+                if data.resolver_mode ~= "none" then
+                    local conf = 0
+                    if data.resolver_mode == "ml" then
+                        conf = data.ml_confidence or 0.5
+                    elseif data.resolver_mode == "prediction" then
+                        conf = data.prediction_confidence or 0.5
+                    elseif data.resolver_mode == "bruteforce" then
+                        conf = 0.3
+                    end
+                    
+                    -- Small confidence bar
+                    local bar_width = 40 * scale
+                    local bar_x = sx - bar_width/2
+                    local bar_y = sy - 70
+                    
+                    renderer.rectangle(bar_x, bar_y, bar_width, 3, 30, 30, 30, 200)
+                    
+                    local bar_color = conf > 0.7 and {100, 255, 100} or 
+                                     conf > 0.4 and {255, 200, 100} or 
+                                     {255, 100, 100}
+                    
+                    renderer.rectangle(bar_x, bar_y, bar_width * conf, 3,
+                        bar_color[1], bar_color[2], bar_color[3], 255)
+                end
+            end
+            
+            -- Angle visualization
+            if has_visual("Show resolved angle") then
+                local line_length = 40 * scale
+                local angle_rad = math.rad(data.resolved_yaw - 90)
+                local end_x = sx + math.cos(angle_rad) * line_length
+                local end_y = sy + math.sin(angle_rad) * line_length
+                
+                -- Color based on resolver mode
+                local line_color = {200, 200, 200}
+                if data.resolver_mode == "ml" then
+                    line_color = {100, 150, 255}
+                elseif data.resolver_mode == "prediction" then
+                    line_color = {100, 255, 150}
+                elseif data.resolver_mode == "bruteforce" then
+                    line_color = {255, 150, 100}
+                end
+                
+                -- Draw line with glow
+                for i = 3, 1, -1 do
+                    renderer.line(sx, sy, end_x, end_y, 
+                        line_color[1], line_color[2], line_color[3], 255 / i)
+                end
+                
+                -- Arrow head
+                local arrow_size = 5 * scale
+                local angle1 = angle_rad + 2.5
+                local angle2 = angle_rad - 2.5
+                
+                renderer.triangle(
+                    end_x, end_y,
+                    end_x - math.cos(angle1) * arrow_size, end_y - math.sin(angle1) * arrow_size,
+                    end_x - math.cos(angle2) * arrow_size, end_y - math.sin(angle2) * arrow_size,
+                    line_color[1], line_color[2], line_color[3], 255
+                )
+            end
+            
+            -- LBY timer (only when critical)
+            if has_visual("Show LBY timer") and not data.is_moving then
+                if data.lby_timer > 0.8 or data.lby_can_update then
+                    local timer_color = data.lby_can_update and {255, 50, 50} or {255, 200, 50}
+                    local timer_text = data.lby_can_update and "!" or string.format("%.1f", 1.1 - data.lby_timer * 1.1)
+                    
+                    renderer.circle(sx - 30, sy, timer_color[1], timer_color[2], timer_color[3], 200, 8, 0, 1)
+                    renderer.text(sx - 30, sy, 255, 255, 255, 255, "c-", 0, timer_text)
+                end
+            end
+            
+            -- Success rate (compact)
+            if has_visual("Show success rate") and data.shots_fired_at > 0 then
+                local rate = math.floor((data.hit_shots / data.shots_fired_at) * 100)
+                local rate_color = rate > 60 and {100, 255, 100} or 
+                                  rate > 30 and {255, 200, 100} or 
+                                  {255, 100, 100}
+                
+                renderer.text(sx, sy - 105, rate_color[1], rate_color[2], rate_color[3], 200, "c-", 0, rate .. "%")
+            end
+            
+            -- Defensive warning (important)
+            if data.is_defensive then
+                local pulse = math.sin(globals.realtime() * 5) * 0.5 + 0.5
+                renderer.text(sx, sy - 120, 255, 0, 255, 255 * pulse, "cb", 0, "DEFENSIVE")
+            end
+            
+            -- Debug mode overlay
+            if ui.get(resolver.refs.debug_mode) then
+                local debug_y = sy + 20
+                local line_height = 10
+                
+                -- Compact debug info
+                local debug_info = {
+                    string.format("R: %s", data.resolver_mode),
+                    string.format("D: %s%d", data.desync_side > 0 and "+" or "", data.desync_side * data.desync_amount),
+                    string.format("M: %d/%d", data.hit_shots, data.shots_fired_at),
+                    string.format("V: %.0f", data.speed)
+                }
+                
+                for i, text in ipairs(debug_info) do
+                    renderer.text(sx + 50, debug_y + (i-1) * line_height, 
+                        200, 200, 200, 200, "-", 0, text)
+                end
+            end
+            
+            ::continue::
+        end
+    end
+    
+    -- Global stats (only in debug)
+    if ui.get(resolver.refs.debug_mode) then
+        local y = 200
+        renderer.text(10, y, 255, 255, 255, 255, "-", 0, "Resolver Performance:")
+        y = y + 15
+        
+        for method, rate in pairs(resolver.global_state.success_rate) do
+            local percentage = math.floor(rate * 100)
+            local color = percentage > 60 and {100, 255, 100} or {255, 100, 100}
+            
+            renderer.text(10, y, color[1], color[2], color[3], 255, "-", 0, 
+                string.format("%s: %d%%", method, percentage))
+            y = y + 12
+        end
+    end
+end
+
+-- Check for misses after delay (continues in paint callback)
+client.set_event_callback("paint", function()
+    local tick = globals.tickcount()
+    
+    for shot_tick, shot in pairs(shot_data) do
+        if shot.result == "pending" and tick - shot_tick > 3 then
+            -- This shot missed
+            shot.result = "miss"
+            shot.miss_reason = shot.potential_miss and "spread" or "resolver"
+            
+            -- Update player data
+            local data = get_player(shot.player_idx)
+            if data then
+                data.missed_shots = data.missed_shots + 1
+                data.last_miss_reason = shot.miss_reason
+                
+                -- Update resolver state
+                if data.resolver_mode == "bruteforce" then
+                    -- Move to next bruteforce angle
+                    data.bruteforce_phase = data.bruteforce_phase + 1
+                elseif data.resolver_mode == "prediction" then
+                    -- Reduce prediction confidence
+                    data.prediction_confidence = math.max(0, data.prediction_confidence - 0.1)
+                end
+                
+                -- Update global statistics
+                local method = data.resolver_mode
+                if method then
+                    resolver.global_state.success_rate[method] = resolver.global_state.success_rate[method] or 0.5
+                    resolver.global_state.success_rate[method] = resolver.global_state.success_rate[method] * 0.95
+                end
+                
+                -- Update registry
+                for i, reg_shot in ipairs(resolver.shot_registry) do
+                    if reg_shot.result == "pending" and reg_shot.player_idx == shot.player_idx then
+                        reg_shot.result = "miss"
+                        reg_shot.miss_reason = shot.miss_reason
+                        break
+                    end
+                end
+            end
+            
+            -- Remove from tracking
+            shot_data[shot_tick] = nil
+        end
+    end
+    
+    -- Call main paint function
+    on_paint()
+end)
+
+-- Peeking assistant for resolver
+local function on_run_command(cmd)
+    if not ui.get(resolver.refs.enabled) then return end
+    
+    -- This is where we'd implement advanced features like:
+    -- 1. Micro-movement to bait LBY updates
+    -- 2. Peek timing based on resolver confidence
+    -- 3. Automatic angle adjustment based on miss patterns
+end
+
+-- Override entity angles using plist
+client.set_event_callback("net_update_end", function()
+    if not ui.get(resolver.refs.enabled) then return end
+    
+    local enemies = entity.get_players(true)
+    for i = 1, #enemies do
+        local enemy = enemies[i]
+        if entity.is_alive(enemy) then
+            local data = get_player(enemy)
+            
+            -- Override angles for rage bot using plist
+            if data.resolved_yaw ~= data.eye_angles.yaw then
+                plist.set(enemy, "Force body yaw", true)
+                plist.set(enemy, "Force body yaw value", data.resolved_yaw)
+                
+                -- Apply pitch override if defensive
+                if data.is_defensive then
+                    plist.set(enemy, "Force pitch", true)
+                    plist.set(enemy, "Force pitch value", data.resolved_pitch)
+                else
+                    plist.set(enemy, "Force pitch", false)
+                end
+            else
+                -- Disable overrides if not resolving
+                plist.set(enemy, "Force body yaw", false)
+                plist.set(enemy, "Force pitch", false)
+            end
+        end
+    end
+end)
+
+-- Reset on round start
+client.set_event_callback("round_start", function()
+    resolver.players = {}
+    resolver.global_state.success_rate = {}
+    resolver.shot_registry = {}
+    shot_data = {}
+    
+    -- Clear all plist overrides
+    local enemies = entity.get_players(true)
+    for i = 1, #enemies do
+        plist.set(enemies[i], "Force body yaw", false)
+        plist.set(enemies[i], "Force pitch", false)
+        plist.set(enemies[i], "Force safe point", false)
+        plist.set(enemies[i], "Override minimum damage", false)
+        plist.set(enemies[i], "Force body aim", false)
+    end
+end)
+
+-- Clean up on death
+client.set_event_callback("player_death", function(e)
+    local victim = client.userid_to_entindex(e.userid)
+    if resolver.players[victim] then
+        resolver.players[victim] = nil
+        
+        -- Clear plist for dead player
+        plist.set(victim, "Force body yaw", false)
+        plist.set(victim, "Force pitch", false)
+        plist.set(victim, "Force safe point", false) 
+        plist.set(victim, "Override minimum damage", false)
+        plist.set(victim, "Force body aim", false)
+    end
+end)
+
+-- Register callbacks
+client.set_event_callback("setup_command", on_setup_command)
+client.set_event_callback("run_command", on_run_command)
+
+-- Cleanup on shutdown
+client.set_event_callback("shutdown", function()
+    for _, ref in pairs(resolver.refs) do
+        if type(ref) == "number" then
+            ui.set_visible(ref, false)
+        end
+    end
+end)
+
+-- Auto-config when resolver is enabled
+local function update_visibility()
+    local enabled = ui.get(resolver.refs.enabled)
+    ui.set_visible(resolver.refs.visuals, enabled)
+    ui.set_visible(resolver.refs.debug_mode, enabled)
+    ui.set_visible(resolver.refs.shot_log, enabled)
+    ui.set_visible(resolver.refs.shot_log_size, enabled and ui.get(resolver.refs.shot_log))
+    ui.set_visible(resolver.refs.anti_underdmg, enabled)
+    ui.set_visible(resolver.refs.min_damage_override, enabled and ui.get(resolver.refs.anti_underdmg))
+    ui.set_visible(resolver.refs.lethal_damage, enabled and ui.get(resolver.refs.anti_underdmg))
+    ui.set_visible(resolver.refs.scale_damage, enabled and ui.get(resolver.refs.anti_underdmg))
+end
+
+-- Add callback for anti-underdamage toggle
+ui.set_callback(resolver.refs.anti_underdmg, update_visibility)
+
+-- Update visibility on toggle
+ui.set_callback(resolver.refs.enabled, update_visibility)
+ui.set_callback(resolver.refs.shot_log, update_visibility)
+update_visibility()
+
+-- Initialize
+print("[ULTIMATE RESOLVER] v2.0 Loaded!")
+print("===============================")
+print("✓ Hybrid resolver (Bruteforce + Prediction + ML)")
+print("✓ Shot Registry™ with detailed analysis")
+print("✓ Defensive AA detection")
+print("✓ Animated startup sequence")
+print("✓ All methods work automatically")
+print("===============================")
+print("Check RAGE -> Other for options")
+
+-- Enable by default
+ui.set(resolver.refs.enabled, true)
+ui.set(resolver.refs.visuals, {"Show resolved angle", "Show AA type"})
+ui.set(resolver.refs.shot_log, true)
+ui.set(resolver.refs.anti_underdmg, true)
+ui.set(resolver.refs.min_damage_override, 10)
+ui.set(resolver.refs.lethal_damage, true)
+
+
+masz tu caly kod ktory zrobilem z ai nic nie usuwaj nie bedzie taki dlugi jaki jest teraz chce zebys na nim bazowal czyli kazda zmiana czy edytacja czy ulepszenie chce zebys robil na tym kodzie nie pisz go co zmiane czy naprawe od zera teraz mozesz go przepisac tutaj sobie zeby moc go sobie edytowac 
