@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TFT Assistant - Asystent Kompozycji i Ekonomii</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo">
+                <span class="logo-icon">⚔️</span>
+                <h1>TFT Assistant</h1>
+            </div>
+            <nav class="nav-tabs">
+                <button class="tab-btn active" data-tab="counter">🎯 Counter Pick</button>
+                <button class="tab-btn" data-tab="economy">💰 Ekonomia</button>
+                <button class="tab-btn" data-tab="comps">📋 Kompozycje</button>
+            </nav>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Counter Pick Section -->
+            <section id="counter" class="tab-content active">
+                <div class="section-header">
+                    <h2>🎯 Analizator Przeciwników</h2>
+                    <p>Wybierz traity i kompozycje, które widzisz u przeciwników</p>
+                </div>
+
+                <div class="counter-grid">
+                    <!-- Enemy Traits Selection -->
+                    <div class="panel enemy-panel">
+                        <h3>🔴 Traity Przeciwników</h3>
+                        <div class="trait-selector" id="enemy-traits">
+                            <!-- Traits will be populated by JS -->
+                        </div>
+                        <div class="selected-traits">
+                            <h4>Wybrane traity:</h4>
+                            <div id="selected-enemy-traits" class="trait-tags"></div>
+                        </div>
+                    </div>
+
+                    <!-- Recommendations -->
+                    <div class="panel recommendations-panel">
+                        <h3>✅ Rekomendacje dla Ciebie</h3>
+                        <div id="recommendations" class="recommendations">
+                            <div class="placeholder">
+                                <span>👈</span>
+                                <p>Wybierz traity przeciwników, aby zobaczyć rekomendacje</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Quick Analysis -->
+                <div class="panel analysis-panel">
+                    <h3>📊 Szybka Analiza Lobby</h3>
+                    <div class="lobby-analysis">
+                        <div class="analysis-item">
+                            <label>Ile osób gra AP (magiczne)?</label>
+                            <input type="number" id="ap-players" min="0" max="7" value="0">
+                        </div>
+                        <div class="analysis-item">
+                            <label>Ile osób gra AD (fizyczne)?</label>
+                            <input type="number" id="ad-players" min="0" max="7" value="0">
+                        </div>
+                        <div class="analysis-item">
+                            <label>Ile osób gra tanki?</label>
+                            <input type="number" id="tank-players" min="0" max="7" value="0">
+                        </div>
+                        <button class="btn btn-primary" onclick="analyzeLobby()">Analizuj Lobby</button>
+                    </div>
+                    <div id="lobby-result" class="lobby-result"></div>
+                </div>
+            </section>
+
+            <!-- Economy Section -->
+            <section id="economy" class="tab-content">
+                <div class="section-header">
+                    <h2>💰 Asystent Ekonomii</h2>
+                    <p>Zarządzaj złotem i planuj swoją ekonomię</p>
+                </div>
+
+                <div class="economy-grid">
+                    <!-- Current State -->
+                    <div class="panel state-panel">
+                        <h3>📍 Twój Obecny Stan</h3>
+                        <div class="state-inputs">
+                            <div class="input-group">
+                                <label>Aktualne złoto:</label>
+                                <input type="number" id="current-gold" min="0" max="999" value="50">
+                            </div>
+                            <div class="input-group">
+                                <label>Aktualny poziom:</label>
+                                <input type="number" id="current-level" min="1" max="10" value="6">
+                            </div>
+                            <div class="input-group">
+                                <label>Aktualna runda:</label>
+                                <select id="current-stage">
+                                    <option value="2-1">2-1</option>
+                                    <option value="2-5">2-5</option>
+                                    <option value="3-1">3-1</option>
+                                    <option value="3-2" selected>3-2</option>
+                                    <option value="3-5">3-5</option>
+                                    <option value="4-1">4-1</option>
+                                    <option value="4-2">4-2</option>
+                                    <option value="4-5">4-5</option>
+                                    <option value="5-1">5-1</option>
+                                    <option value="5-2">5-2</option>
+                                    <option value="5-5">5-5</option>
+                                    <option value="6-1">6-1</option>
+                                    <option value="6-2">6-2</option>
+                                </select>
+                            </div>
+                            <div class="input-group">
+                                <label>HP:</label>
+                                <input type="number" id="current-hp" min="1" max="100" value="70">
+                            </div>
+                            <div class="input-group">
+                                <label>Passa (win/lose streak):</label>
+                                <select id="streak">
+                                    <option value="0">Brak</option>
+                                    <option value="2">2 (win/lose)</option>
+                                    <option value="3">3 (win/lose)</option>
+                                    <option value="4">4 (win/lose)</option>
+                                    <option value="5">5+ (win/lose)</option>
+                                </select>
+                            </div>
+                        </div>
+                        <button class="btn btn-primary" onclick="calculateEconomy()">💡 Pokaż Poradę</button>
+                    </div>
+
+                    <!-- Economy Advice -->
+                    <div class="panel advice-panel">
+                        <h3>💡 Porada Ekonomiczna</h3>
+                        <div id="economy-advice" class="advice-content">
+                            <div class="placeholder">
+                                <span>⬅️</span>
+                                <p>Wprowadź swój stan gry i kliknij "Pokaż Poradę"</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Interest Calculator -->
+                    <div class="panel calculator-panel">
+                        <h3>🧮 Kalkulator Odsetek</h3>
+                        <div class="interest-info">
+                            <p>Odsetki w TFT: <strong>+1 złoto za każde 10 złota</strong> (max 5)</p>
+                            <table class="interest-table">
+                                <thead>
+                                    <tr>
+                                        <th>Złoto</th>
+                                        <th>Odsetki</th>
+                                        <th>Zalecenie</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr><td>0-9</td><td>+0</td><td class="bad">❌ Zbyt mało</td></tr>
+                                    <tr><td>10-19</td><td>+1</td><td class="ok">⚠️ Minimum</td></tr>
+                                    <tr><td>20-29</td><td>+2</td><td class="ok">⚠️ W porządku</td></tr>
+                                    <tr><td>30-39</td><td>+3</td><td class="good">✅ Dobra baza</td></tr>
+                                    <tr><td>40-49</td><td>+4</td><td class="good">✅ Silna ekonomia</td></tr>
+                                    <tr><td>50+</td><td>+5</td><td class="great">🌟 Maksimum!</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <!-- Level Up Costs -->
+                    <div class="panel levelup-panel">
+                        <h3>📈 Koszty Levelowania</h3>
+                        <table class="levelup-table">
+                            <thead>
+                                <tr>
+                                    <th>Poziom</th>
+                                    <th>Koszt XP</th>
+                                    <th>Kiedy levelować</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr><td>2 → 3</td><td>2 XP</td><td>Automatycznie</td></tr>
+                                <tr><td>3 → 4</td><td>6 XP</td><td>Automatycznie</td></tr>
+                                <tr><td>4 → 5</td><td>10 XP</td><td>2-5 / 2-7</td></tr>
+                                <tr><td>5 → 6</td><td>20 XP</td><td>3-2 / 3-5</td></tr>
+                                <tr><td>6 → 7</td><td>36 XP</td><td>4-1 / 4-2</td></tr>
+                                <tr><td>7 → 8</td><td>56 XP</td><td>4-5 / 5-1</td></tr>
+                                <tr><td>8 → 9</td><td>80 XP</td><td>5-1+ / 5-5+</td></tr>
+                                <tr><td>9 → 10</td><td>120 XP</td><td>6-1+ (rzadko)</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Roll Odds -->
+                <div class="panel odds-panel">
+                    <h3>🎲 Szanse na Championów</h3>
+                    <table class="odds-table">
+                        <thead>
+                            <tr>
+                                <th>Poziom</th>
+                                <th class="cost-1">1💰</th>
+                                <th class="cost-2">2💰</th>
+                                <th class="cost-3">3💰</th>
+                                <th class="cost-4">4💰</th>
+                                <th class="cost-5">5💰</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr><td>Lv 3</td><td>75%</td><td>25%</td><td>0%</td><td>0%</td><td>0%</td></tr>
+                            <tr><td>Lv 4</td><td>55%</td><td>30%</td><td>15%</td><td>0%</td><td>0%</td></tr>
+                            <tr><td>Lv 5</td><td>45%</td><td>33%</td><td>20%</td><td>2%</td><td>0%</td></tr>
+                            <tr><td>Lv 6</td><td>30%</td><td>40%</td><td>25%</td><td>5%</td><td>0%</td></tr>
+                            <tr><td>Lv 7</td><td>19%</td><td>35%</td><td>35%</td><td>10%</td><td>1%</td></tr>
+                            <tr><td>Lv 8</td><td>18%</td><td>25%</td><td>32%</td><td>22%</td><td>3%</td></tr>
+                            <tr><td>Lv 9</td><td>10%</td><td>20%</td><td>25%</td><td>35%</td><td>10%</td></tr>
+                            <tr><td>Lv 10</td><td>5%</td><td>10%</td><td>20%</td><td>40%</td><td>25%</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- Compositions Section -->
+            <section id="comps" class="tab-content">
+                <div class="section-header">
+                    <h2>📋 Meta Kompozycje</h2>
+                    <p>Najpopularniejsze i najsilniejsze kompozycje w obecnym patchu</p>
+                </div>
+
+                <div class="comps-filter">
+                    <button class="filter-btn active" data-filter="all">Wszystkie</button>
+                    <button class="filter-btn" data-filter="s-tier">S-Tier</button>
+                    <button class="filter-btn" data-filter="a-tier">A-Tier</button>
+                    <button class="filter-btn" data-filter="flex">Flex</button>
+                </div>
+
+                <div id="compositions" class="compositions-grid">
+                    <!-- Compositions will be populated by JS -->
+                </div>
+            </section>
+        </main>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <p>TFT Assistant v1.0 | Dane dla Set 13 | Stworzono z ❤️</p>
+        </footer>
+    </div>
+
+    <script src="data.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
